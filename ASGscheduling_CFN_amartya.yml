@@ -1,0 +1,188 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Lambda function with cfn-response.
+Parameters:
+  StopScheduled:
+    Default: cron(0 21 ? * 6 *)
+    Description: enter an Schedule expression example cron(0 18 ? * MON-FRI *)
+    Type: String
+  StartScheduled:
+    Default: cron(30 0 ? * 2 *)
+    Description: enter an Schedule expression example cron(0 8 ? * MON-FRI * ) 
+    Type: String
+Resources:
+  StopASG:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.9
+      Role: !GetAtt Role.Arn
+      Handler: index.lambda_handler
+      Timeout: 900
+      Code:
+        ZipFile: |
+          import os
+          import boto3
+          from datetime import datetime
+
+          print("Lambda_trigerred at ", datetime.now())
+          client = boto3.client('autoscaling')
+
+          dynamodb = boto3.resource('dynamodb')
+
+          def write_data_in_database(params):
+              print('Writing DynamoDb')
+              try:
+                  dynamodb = boto3.resource('dynamodb')
+                  table = dynamodb.Table("autoscheduler-table")
+                  table.put_item(Item=params)
+              except Exception as e:
+                  print(f"DynamoDb Exception {e}!")
+                  return False
+              print("Data add successfully.")
+              return True
+
+
+          def lambda_handler(event, context):
+              
+              paginator = client.get_paginator('describe_auto_scaling_groups')
+              page_iterator = paginator.paginate(PaginationConfig={'PageSize': 100})
+              filtered_asgs = page_iterator.search('AutoScalingGroups[] | [?contains(Tags[?Key==`{}`].Value, `{}`)]'.format('scheduling', 'True'))
+              for asg in filtered_asgs:
+                  print(asg['AutoScalingGroupName'])
+                  params = {
+                      'ASG_name' : asg['AutoScalingGroupName'],
+                      'LastShutDownAt' : str(datetime.now()),
+                      'MinSize' : asg['MinSize'],
+                      'MaxSize' : asg['MaxSize'],
+                      'DesiredCapacity' : asg['DesiredCapacity']
+                  }
+                  write_data_in_database(params)
+                  response = client.update_auto_scaling_group(
+                      AutoScalingGroupName=asg['AutoScalingGroupName'],
+                      MinSize=0,
+                      MaxSize=0,
+                      DesiredCapacity=0,
+                  )
+      Description: Function that stops ASG
+  permissionForEventsToInvokeStopASG:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt StopASG.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      "SourceArn": !GetAtt StopScheduledRule.Arn
+
+  StartASG:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.8
+      Role: !GetAtt Role.Arn
+      Handler: index.lambda_handler
+      Timeout: 60
+      Code:
+        ZipFile: |
+          import os
+          import boto3
+          from datetime import datetime
+
+          print("Lambda_trigerred at ", datetime.now())
+          client = boto3.client('autoscaling')
+
+
+          # below code is for reading data into db
+
+          dynamodb = boto3.resource('dynamodb')
+
+          def Read_data_in_database():
+              print('Reading DynamoDb')
+              try:
+                  dynamodb = boto3.resource('dynamodb')
+                  table = dynamodb.Table("autoscheduler-table")
+                  stoppedtb=table.scan()
+              except Exception as e:
+                  print(f"DynamoDb Exception {e}!")
+                  return False
+              print("Data read successfully.")
+              return True
+
+
+          def lambda_handler(event, context):
+              
+              print('Reading DynamoDb')
+              try:
+                  dynamodb = boto3.resource('dynamodb')
+                  table = dynamodb.Table("autoscheduler-table")
+                  stoppedtb=table.scan()
+              except Exception as e:
+                  print(f"DynamoDb Exception {e}!")
+                  return False
+              print("Data read successfully.")
+              print(stoppedtb.get('Items', [])[0]['MinSize'])
+              for asg in stoppedtb.get('Items', []):
+                  response = client.update_auto_scaling_group(
+                      AutoScalingGroupName=asg['ASG_name'],
+                      MinSize=int(asg['MinSize']),
+                      MaxSize=int(asg['MaxSize']),
+                      DesiredCapacity=int(asg['DesiredCapacity']),
+                  )
+              print("ASGs ")
+
+          
+
+      Description: Function that started instances
+  permissionForEventsToInvokeStartASG:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt StartASG.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      "SourceArn": !GetAtt StartScheduledRule.Arn
+
+  Role:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: "StartRole"
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyName: StartASGpermissions
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "dynamodb:Scan"
+                  - "logs:CreateLogGroup"
+                  - "autoscaling:*"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                  - "dynamodb:PutItem"
+                  - "dynamodb:GetItem"
+                Resource: "*"
+  StopScheduledRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: "ScheduledRule"
+      ScheduleExpression: !Ref StopScheduled
+      State: "ENABLED"
+      Targets:
+        - Arn: !GetAtt StopASG.Arn
+          Id: "TargetFunctionV1"
+  StartScheduledRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: "ScheduledRule"
+      ScheduleExpression: !Ref StartScheduled
+      State: "ENABLED"
+      Targets:
+        - Arn: !GetAtt StartASG.Arn
+          Id: "TargetFunctionV1"
