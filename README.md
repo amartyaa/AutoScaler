@@ -15,9 +15,9 @@ Create stack using this template to scale-down all autoscaling groups to 0,0,0 a
 
 DynamoDB Config
 
-|ASG_name | LastShutDownAt | DesiredCapacity | MaxSize | MinSize|
+|ASG_name [PK] | LastShutDownAt | DesiredCapacity | MaxSize | MinSize|
 | --- | :---: | :---: | :---: | :---: |
-|"name of ASG" | time | 4 | 6 | 2|
+|*string* | *time* | *number* | *number* | *number*|
 
 #### startASG_lambda.py 
 >> scales up to all the ASG to configuration in accordance to database
