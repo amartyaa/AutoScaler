@@ -21,11 +21,7 @@ def write_data_in_database(params):
 
 
 def lambda_handler(event, context):
-    
-    # paginator = client.get_paginator('describe_auto_scaling_groups')
-    # page_iterator = paginator.paginate(PaginationConfig={'PageSize': 100})
-    # filtered_asgs = page_iterator.search('AutoScalingGroups[] | [?contains(Tags[?Key==`{}`].Value, `{}`)]'.format('', ''))
-    # print(filtered_asgs)
+
     autoscalinggroups = client.describe_auto_scaling_groups()['AutoScalingGroups']
     for asg in autoscalinggroups:
         print(asg['AutoScalingGroupName'])
