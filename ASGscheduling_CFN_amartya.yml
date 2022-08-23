@@ -1,32 +1,53 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: Lambda function with cfn-response.
 Parameters:
-  Tablename:
-    Description: DynamoDB table name where you want to store ASG config
-    Type: String
-  Region:
-    Description: regions comma seperated
-    Type: String
   StopScheduled:
     Default: cron(0 21 ? * 6 *)
-    Description: enter an Schedule expression example cron(0 18 ? * MON-FRI *)
+    Description: enter an Schedule expression example cron(0 18 ? * MON-FRI *) in UTC
     Type: String
   StartScheduled:
     Default: cron(30 0 ? * 2 *)
-    Description: enter an Schedule expression example cron(0 8 ? * MON-FRI * ) 
+    Description: enter an Schedule expression example cron(0 8 ? * MON-FRI * ) in UTC
+    Type: String
+  ASGLABEL:
+    Default: ama:true
+    Description: enter tags to filter ASG for scaleUp&Down, enter all to select all resources else give in tag:value format
+    Type: String
+  EC2LABEL:
+    Default: ama:true
+    Description: enter tags to filter ASG for scaleUp&Down, enter all to select all resources else give in tag:value format
+    Type: String
+  REGIONS:
+    Default: eu-central-1,eu-west-1
+    Description: enter comma seperated value of REGIONS
     Type: String
 Resources:
+  asgTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: Name
+          AttributeType: S
+      KeySchema:
+        - AttributeName: Name
+          KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: 1
+        WriteCapacityUnits: 1
+      TableName: autoscheduler-table
   StopASG:
     Type: AWS::Lambda::Function
     Properties:
-      Environment:
-        Variables:
-          AMI_REGION: !Ref Region
-          TABLE_NAME: !Ref Tablename
       Runtime: python3.9
       Role: !GetAtt Role.Arn
       Handler: index.lambda_handler
-      Timeout: 900
+      Timeout: 300
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref asgTable
+          ASG_LABEL: !Ref ASGLABEL
+          EC2_LABEL: !Ref EC2LABEL
+          REGIONS: !Ref REGIONS
       Code:
         ZipFile: |
           import os
@@ -38,54 +59,82 @@ Resources:
 
           dynamodb = boto3.resource('dynamodb')
 
-          def write_data_in_database(params):
-            table_name = os.environ.get('TABLE_NAME')
-            print('Writing DynamoDb')
-            try:
-              dynamodb = boto3.resource('dynamodb')
-              table = dynamodb.Table(table_name)
-              table.put_item(Item=params)
-            except Exception as e:
-              print(f"DynamoDb Exception {e}!")
-              return False
-            print("Data added successfully.")
 
-          def shutdown(region):
-            client = boto3.client('autoscaling',region_name = region)
-            try:
-              autoscalinggroups = client.describe_auto_scaling_groups()['AutoScalingGroups']
+
+          def lambda_handler(event, context):
+              for region in os.environ["REGIONS"].split(","):
+                  asg_client = boto3.client('autoscaling',region_name=region)
+                  ASGscaleDown(asg_client,region)
+                  ec2 = boto3.resource('ec2',region_name=region)
+                  Ec2ScaleDown(ec2,region)
+                  
+          def ASGscaleDown(client,region):
+              label = str(os.environ['ASG_LABEL']).split(":")
+              
+              paginator = client.get_paginator('describe_auto_scaling_groups')
+              page_iterator = paginator.paginate(
+                  PaginationConfig={'PageSize': 100}
+              )
+              if label!="all":
+                  key = "tag:"+label[0]
+                  value = []
+                  value.append(label[1])
+                  filters=[
+                          {'Name': key,'Values': value}
+                      ]
+                  autoscalinggroups = client.describe_auto_scaling_groups(Filters=filters)['AutoScalingGroups']
+              else:
+                  autoscalinggroups = client.describe_auto_scaling_groups()['AutoScalingGroups']
+                  
               for asg in autoscalinggroups:
-                print(asg['AutoScalingGroupName'])
-                params = {
-                  'ASG_name' : asg['AutoScalingGroupName'],
-                  'LastShutDownAt' : str(datetime.now()),
-                  'MinSize' : asg['MinSize'],
-                  'MaxSize' : asg['MaxSize'],
-                  'DesiredCapacity' : asg['DesiredCapacity'],
-                  'Region' : region
-                }
-                print(params)
-                write_data_in_database(params)
-                response = client.update_auto_scaling_group(
+                  print(asg['AutoScalingGroupName'])
+                  params = {
+                      'Name' : asg['AutoScalingGroupName'],
+                      'LastShutDownAt' : str(datetime.now()),
+                      'MinSize' : asg['MinSize'],
+                      'MaxSize' : asg['MaxSize'],
+                      'DesiredCapacity' : asg['DesiredCapacity'],
+                      'Region' : region,
+                      'Type' : "ASG"
+                  }
+                  print(params)
+                  
+                  write_data_in_database(params)
+                  response = client.update_auto_scaling_group(
                       AutoScalingGroupName=asg['AutoScalingGroupName'],
                       MinSize=0,
                       MaxSize=0,
                       DesiredCapacity=0,
-                )
-            except Exception as e:
-              print(f"Exception {e}!")
-
-          def lambda_handler(event, context):
-            regions = os.environ.get('AMI_REGION')
-            # print(regions)
-            regionList = regions.split(',')
-            if len(regionList) > 0:
-                for region in regionList:
-                  print('shutting down the ASGs in',region)
-                  shutdown(region)
-    
-
+                  )
+                  
+          def Ec2ScaleDown(ec2,client,region):
+              label = str(os.environ['EC2_LABEL']).split(":")
+              if label!="all":
+                  key = "tag:"+label[0]
+                  value = []
+                  value.append(label[1])
+                  filters=[
+                          {'Name': 'instance-state-name', 'Values': ['running']},
+                          {'Name': key,            'Values': value}
+                      ]
+              else:
+                  filters=[
+                          {'Name': 'instance-state-name', 'Values': ['running']},
+                      ]
+              instances = ec2.instances.filter(Filters=filters)
+              instances.stop()
               
+          def write_data_in_database(params):
+              print('Writing DynamoDb')
+              try:
+                  dynamodb = boto3.resource('dynamodb')
+                  table = dynamodb.Table(os.environ["TABLE_NAME"])
+                  table.put_item(Item=params)
+              except Exception as e:
+                  print(f"DynamoDb Exception {e}!")
+                  return False
+              print("Data add successfully.")
+              return True
 
       Description: Function that stops ASG
   permissionForEventsToInvokeStopASG:
@@ -99,89 +148,101 @@ Resources:
   StartASG:
     Type: AWS::Lambda::Function
     Properties:
-      Environment:
-        Variables:
-          AMI_REGION: !Ref Region
-          TABLE_NAME: !Ref Tablename
       Runtime: python3.9
       Role: !GetAtt Role.Arn
       Handler: index.lambda_handler
-      Timeout: 60
+      Timeout: 120
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref asgTable
+          ASG_LABEL: !Ref ASGLABEL
+          EC2_LABEL: !Ref EC2LABEL
+          REGIONS: !Ref REGIONS
       Code:
         ZipFile: |
           import os
           import boto3
-          from boto3.dynamodb.conditions import Key
           from datetime import datetime
-          from botocore.exceptions import ClientError
-
 
           print("Lambda_trigerred at ", datetime.now())
 
-          tablename = os.environ.get('TABLE_NAME')
 
-          # below code is for reading data into db
+
+
 
           dynamodb = boto3.resource('dynamodb')
 
+          def Read_data_in_database():
+              print('Reading DynamoDb')
+              try:
+                  dynamodb = boto3.resource('dynamodb')
+                  table = dynamodb.Table(os.environ["TABLE_NAME"])
+                  stoppedtb=table.scan()
+              except Exception as e:
+                  print(f"DynamoDb Exception {e}!")
+                  return False
+              print("Data read successfully.")
+              return True
+
+
           def lambda_handler(event, context):
-            regions = os.environ.get('AMI_REGION')
-            regionList = regions.split(',')
-            if len(regionList) > 0:
-              for region in regionList:
-                i = StartASG(region)
-                print(i,' ASGs started in region: ',region)
-            print("All ASGs scaled up")
-
-          def StartASG(region):
-            client = boto3.client('autoscaling',region_name=region)
-            print('Reading DynamoDb')
-            count = 0
-            try:
-                dynamodb = boto3.resource('dynamodb')
-                table = dynamodb.Table(tablename)
-                stoppedtb=table.scan(FilterExpression=Key("Region").eq(region))
-            except Exception as e:
-                print(f"DynamoDb Exception {e}!")
-                return False
-                
-            print("Data read successfully.")
-            for asg in stoppedtb.get('Items', []):
-              check = client.describe_auto_scaling_groups(
-                  AutoScalingGroupNames=[
-                      asg['ASG_name']
-                  ],
+              
+              print('Reading DynamoDb')
+              try:
+                  dynamodb = boto3.resource('dynamodb')
+                  table = dynamodb.Table(os.environ["TABLE_NAME"])
+                  stoppedtb=table.scan()
+              except Exception as e:
+                  print(f"DynamoDb Exception {e}!")
+                  return False
+              print("Data read successfully.")
+              
+              for asg in stoppedtb.get('Items', []):
+                  client = boto3.client('autoscaling',region_name = asg['Region'])
+                  check = client.describe_auto_scaling_groups(
+                      AutoScalingGroupNames=[
+                          asg['Name']
+                      ],
+                      )
+                  if(check['AutoScalingGroups'] !=[] ):
+                      response = client.update_auto_scaling_group(
+                      AutoScalingGroupName=asg['Name'],
+                      MinSize=int(asg['MinSize']),
+                      MaxSize=int(asg['MaxSize']),
+                      DesiredCapacity=int(asg['DesiredCapacity']),
                   )
-              if(check['AutoScalingGroups'] !=[] ):
-                response = client.update_auto_scaling_group(
-                  AutoScalingGroupName=asg['ASG_name'],
-                  MinSize=int(asg['MinSize']),
-                  MaxSize=int(asg['MaxSize']),
-                  DesiredCapacity=int(asg['DesiredCapacity']),
-              )
-                count+=1
-                deleteItemfromDB(asg['ASG_name'])
+                  else:
+                    print(asg['Name'],'not found in AutoScaling Groups')
+              print("All ASGs scaled up")
+              
+              for region in os.environ["REGIONS"].split(","):
+                  ec2 = boto3.resource('ec2',region_name=region)
+                  Ec2ScaleUp(ec2,region)
+              
+          def Ec2ScaleUp(ec2,region):
+              label = str(os.environ['EC2_LABEL']).split(":")
+              if label!="all":
+                  key = "tag:"+label[0]
+                  value = []
+                  value.append(label[1])
+                  filters=[
+                          {'Name': 'instance-state-name', 'Values': ['stopped']},
+                          {'Name': key,            'Values': value}
+                      ]
               else:
-                print(asg['ASG_name'],'not found in AutoScaling Groups')
-              return count
+                  filters=[
+                          {'Name': 'instance-state-name', 'Values': ['stopped']},
+                      ]
+              # print(type(filters))
+              instances = ec2.instances.filter(Filters=filters)
+              instances.start()
 
-          def deleteItemfromDB(asgname):
-            table = dynamodb.Table(tablename)
-            try:
-              response = table.delete_item(
-                  Key={
-                      'ASG_name': asgname
-                  }
-              )
-            except ClientError as e:
-              if e.response['Error']['Code'] == "ConditionalCheckFailedException":
-                  print(e.response['Error']['Message'])
-              else:
-                  raise
+
+
 
           
 
-      Description: Function that started instances
+      Description: Function that starts instances
   permissionForEventsToInvokeStartASG:
     Type: AWS::Lambda::Permission
     Properties:
@@ -193,7 +254,7 @@ Resources:
   Role:
     Type: "AWS::IAM::Role"
     Properties:
-      RoleName: "StartRole"
+      RoleName: !Sub ${AWS::StackName}-StartStopRole
       AssumeRolePolicyDocument:
         Version: 2012-10-17
         Statement:
@@ -220,7 +281,7 @@ Resources:
                   - "logs:PutLogEvents"
                   - "dynamodb:PutItem"
                   - "dynamodb:GetItem"
-                  - "dynamodb:DeleteItem"
+                  - "ec2:*"
                 Resource: "*"
   StopScheduledRule:
     Type: AWS::Events::Rule
