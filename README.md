@@ -15,9 +15,11 @@ Create stack using this template to scale-down all autoscaling groups to 0,0,0 a
 
 DynamoDB Config
 
-|ASG_name [PK] | LastShutDownAt | DesiredCapacity | MaxSize | MinSize|
-| --- | :---: | :---: | :---: | :---: |
-|*string* | *time* | *number* | *number* | *number*|
+|Name [PK] | LastShutDownAt | DesiredCapacity | MaxSize | MinSize| Type |
+| --- | :---: | :---: | :---: | :---: | :---: |
+|*string* | *time* | *number* | *number* | *number*|  *string*|
+
+DynamoDB is now created by CloudFormation itself
 
 #### startASG_lambda.py 
 >> scales up to all the ASG to configuration in accordance to database
