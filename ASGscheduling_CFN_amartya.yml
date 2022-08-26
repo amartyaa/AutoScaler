@@ -107,7 +107,7 @@ Resources:
                       DesiredCapacity=0,
                   )
                   
-          def Ec2ScaleDown(ec2,client,region):
+          def Ec2ScaleDown(ec2,region):
               label = str(os.environ['EC2_LABEL']).split(":")
               if label!="all":
                   key = "tag:"+label[0]
